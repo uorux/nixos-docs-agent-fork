@@ -43,6 +43,9 @@
   # app's ~/Downloads, so saved files land host-visible under a per-app subdir instead
   # of the app's hidden home. null → off. Value is the app name (the subdir).
   sharedDownloads ? null,
+  # Host override for the gpu capability's device-node list
+  # (modules.sandbox.gpuDevices). null → capabilities-nixpak.nix default (all GPUs).
+  gpuDevices ? null,
 }:
 let
   nixpakSrc = inputs.nixpak or (builtins.throw "nixpak not available - add nixpak to flake inputs");
@@ -83,9 +86,10 @@ let
           # XAUTHORITY — nixpak's sockets.x11 handler DOES read XAUTHORITY and panics
           # when unset, which is why we go through the capability, not that socket).
           ++ [
-            (import ../capabilities-nixpak.nix { inherit lib; } (
-              appCfg.capabilities // { x11 = appCfg.capabilities.x11 || x11Forward; }
-            ))
+            (import ../capabilities-nixpak.nix
+              ({ inherit lib; } // lib.optionalAttrs (gpuDevices != null) { inherit gpuDevices; })
+              (appCfg.capabilities // { x11 = appCfg.capabilities.x11 || x11Forward; })
+            )
           ]
           ++ cfg.sandbox.nixpakModules;
 

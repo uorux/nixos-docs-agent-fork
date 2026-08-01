@@ -164,6 +164,32 @@ let
 in
 {
   options.modules.sandbox = {
+    gpuDevices = lib.mkOption {
+      type = lib.types.nullOr (lib.types.listOf lib.types.str);
+      default = null;
+      example = [
+        "/dev/dri/card1"
+        "/dev/dri/renderD129"
+        "/dev/nvidia0"
+        "/dev/nvidiactl"
+        "/dev/nvidia-modeset"
+        "/dev/nvidia-uvm"
+        "/dev/nvidia-uvm-tools"
+      ];
+      description = ''
+        Device nodes the `gpu` capability binds into app sandboxes. null → the
+        default in lib/capabilities-nixpak.nix (all GPUs). Set on multi-GPU
+        hosts to expose ONLY the display GPU's nodes: chromium picks the first
+        openable /dev/dri/renderD* and NVIDIA Vulkan enumerates every
+        /dev/nvidia*, so a visible compute-only card gets chosen for buffer
+        allocation and every cross-GPU dmabuf import fails (context-lost loop).
+        All entries are bind-try: listing a node absent on some boot is safe.
+        Honored by the v2 backends (systemd/nixpak) only — the legacy in-session
+        wrap keeps the full default (threading host config into it recurses:
+        legacy finalPackage evaluation cycles through config.modules).
+      '';
+    };
+
     forceHomeLocation = lib.mkOption {
       type = lib.types.bool;
       default = false;

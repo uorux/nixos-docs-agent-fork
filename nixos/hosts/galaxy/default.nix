@@ -47,6 +47,29 @@
   # This automatically enables: browsers, communication, productivity, media bundles
   # along with shared desktop modules (base, fonts, xdg, theming, printing)
   modules = {
+    # App sandboxes see ONLY the display GPU (4090). With both cards visible,
+    # chromium/ANGLE picks a device by enumeration order and can land buffer
+    # allocation on the compute-only 5070 while the compositor/window is on the
+    # 4090 — NVIDIA rejects every cross-GPU dmabuf import (EGL_BAD_ALLOC /
+    # VK_ERROR_OUT_OF_DEVICE_MEMORY → context-lost loop, black window; hit by
+    # tetrio 2026-07). The 5070 is llama.cpp's card; no sandboxed GUI app needs
+    # it. Node map (verified via /dev/dri/by-path + nvidia-smi Minor Number;
+    # simple-framebuffer scrambled card numbering, so DRM order ≠ PCI order):
+    #   4090 = pci 01:00.0 → card1, renderD128, /dev/nvidia0
+    #   5070 = pci 05:00.0 → card0, renderD129, /dev/nvidia1
+    # Literal names, not by-path: binds are try-binds, so if a future boot
+    # reshuffles numbering the symptom returns (black tetrio) rather than
+    # breaking anything — re-verify the map then.
+    sandbox.gpuDevices = [
+      "/dev/dri/card1"
+      "/dev/dri/renderD128"
+      "/dev/nvidia0"
+      "/dev/nvidiactl"
+      "/dev/nvidia-modeset"
+      "/dev/nvidia-uvm"
+      "/dev/nvidia-uvm-tools"
+    ];
+
     desktop.full.enable = true;
 
     # Enable gaming bundle

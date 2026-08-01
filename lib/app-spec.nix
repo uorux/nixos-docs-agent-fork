@@ -175,8 +175,9 @@
               default = "stash";
               description = ''
                 stash = /<tier>/sandbox/<app>/<path>, bound into the sandbox and
-                hidden per sandbox.stashOwner. home = normal ~/<path> via
-                impermanence (host-visible), still bound into the sandbox.
+                hidden per the backend's stash owner (derived from the systemd
+                backend + dedicatedUser at lowering in lib/apps.nix). home = normal
+                ~/<path> via impermanence (host-visible), still bound into the sandbox.
               '';
             };
             type = lib.mkOption {

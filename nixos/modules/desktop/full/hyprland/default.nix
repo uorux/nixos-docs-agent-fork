@@ -62,7 +62,8 @@ let
       hl.exec_cmd("waybar")
       hl.exec_cmd("nm-applet")
       hl.exec_cmd("blueman-applet")
-      hl.exec_cmd("mako")
+      -- mako is started by its home-manager systemd user service (theming.nix);
+      -- a second exec_cmd here just raced a duplicate instance.
       hl.exec_cmd("wl-paste --watch cliphist store")
     end)
 
@@ -219,20 +220,11 @@ in
       wlogout.enable = lib.mkDefault true;
     };
 
-    # Lock before the machine sleeps, on EVERY suspend path (lid, wlogout,
-    # `systemctl suspend`, hypridle) — not just the idle timer. This oneshot runs
-    # Before=sleep.target and signals every session to lock (hypridle catches the
-    # logind Lock signal and runs hyprlock), closing the "suspend-then-resume
-    # unlocked" gap.
-    systemd.services.lock-before-sleep = {
-      description = "Lock all sessions before sleep";
-      before = [ "sleep.target" ];
-      wantedBy = [ "sleep.target" ];
-      serviceConfig = {
-        Type = "oneshot";
-        ExecStart = "${pkgs.systemd}/bin/loginctl lock-sessions";
-      };
-    };
+    # Locking before sleep on every suspend path is handled by hypridle's
+    # before_sleep_cmd (hypridle.nix), which additionally holds a logind sleep-delay
+    # inhibitor so hyprlock grabs the screen BEFORE the machine actually suspends. A
+    # Before=sleep.target oneshot here would only duplicate that Lock signal (and
+    # race the suspend), so it was removed — hypridle is the single mechanism.
 
     # Home-manager Hyprland configuration
     home-manager.users.${username} = {

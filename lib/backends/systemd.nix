@@ -40,7 +40,7 @@ let
   envFile = "/run/user/${uid}/sandbox/${appName}.env";
   jrtRuntime = "/run/user/${uid}";
 
-  dedicated = cfg.sandbox.dedicatedUser; # systemd: stashOwner == "dedicated"
+  dedicated = cfg.sandbox.dedicatedUser; # dedicated app-<name> uid vs same-uid jrt
   appUser = if dedicated then "app-${appName}" else username;
   appHome = "/home/${appUser}";
   sharedHome = "/home/${username}";
@@ -76,6 +76,15 @@ let
 
   stashEntries = lib.filter (e: e.location == "stash") storage.entries;
 
+  # extraBinds that are HOME-RELATIVE (not absolute, not a dotfile): the subset the
+  # launcher ACL-GRANTS under jrt's home and revokeAclsScript later tears back down.
+  # One binding, referenced by both the grant block and the revoke script, so the
+  # filter rule can never desync between grant and revoke (a mismatch would leave
+  # ACLs granted that are never revoked — a standing-access leak).
+  relExtraBinds = lib.filter (
+    p: !(lib.hasPrefix "/" p) && !(lib.hasPrefix "." p)
+  ) cfg.sandbox.extraBinds;
+
   innerNix = import ./nixpak-pkg.nix {
     inherit
       appCfg
@@ -86,6 +95,7 @@ let
       storage
       ;
     stashAtHome = true;
+    gpuDevices = config.modules.sandbox.gpuDevices;
     # dedicated: shared jrt data (extraBinds like the vault) lives in jrt's home,
     # not the app's own home.
     sharedHome = if dedicated then sharedHome else null;
@@ -142,6 +152,40 @@ let
   runScript = pkgs.writeShellScript "sandbox-run-${appName}" ''
     set -eu
     ${lib.optionalString dedicated ''
+      # TOCTOU-safe relay bind. The relay SOURCES (jrt's session sockets, pulse
+      # native, the doc subtree, the bridge sock) live in jrt's own 0700 runtime
+      # dir, so a compromised jrt could swap a vetted inode for a symlink in the
+      # window between our checks and `mount --bind` (which follows symlinks on the
+      # source), redirecting root to bind an attacker-chosen path at the app's
+      # trusted socket/doc mountpoint. We can't O_NOFOLLOW-open a socket in shell,
+      # so instead we VALIDATE AFTER COMMIT: vet type (+ non-symlink), record the
+      # device+inode, bind, then confirm the BOUND device+inode equals the vetted
+      # device+inode (and the source is still a non-symlink). Compare %d:%i, NOT %i
+      # alone: jrt can mount a FUSE filesystem (programs.fuse.userAllowOther) and a
+      # FUSE server can return an ARBITRARY st_ino, so an inode-number-only check is
+      # forgeable — jrt could present a source whose st_ino matches a root-owned
+      # target file, then swap a symlink to that target into the window and pass the
+      # recheck. st_dev is assigned by the kernel per mount and is NOT settable by the
+      # FUSE server, so binding across filesystems always changes st_dev; %d:%i closes
+      # the window — we unwind the bind and fail the source. The app hasn't started yet
+      # (setpriv exec is last), so failing one relay is safe; binding an
+      # attacker-chosen inode is not. Args: <src> <target> <S|d>.
+      __bind_checked() {
+        __bc_src=$1; __bc_tgt=$2; __bc_ty=$3
+        if [ ! -e "$__bc_src" ]; then return 1; fi
+        if [ -L "$__bc_src" ]; then return 1; fi
+        if [ "$__bc_ty" = S ] && [ ! -S "$__bc_src" ]; then return 1; fi
+        if [ "$__bc_ty" = d ] && [ ! -d "$__bc_src" ]; then return 1; fi
+        __bc_ino=$(${co}/stat -c %d:%i "$__bc_src" 2>/dev/null) || return 1
+        if ! ${ul}/mount --bind "$__bc_src" "$__bc_tgt" 2>/dev/null; then return 1; fi
+        __bc_bino=$(${co}/stat -c %d:%i "$__bc_tgt" 2>/dev/null || true)
+        if [ "$__bc_bino" != "$__bc_ino" ] || [ -L "$__bc_src" ]; then
+          ${ul}/umount "$__bc_tgt" 2>/dev/null || ${ul}/umount -l "$__bc_tgt" 2>/dev/null || true
+          echo "sandbox-${appName}: relay source '$__bc_src' changed under bind; refusing" >&2
+          return 1
+        fi
+        return 0
+      }
       # App's own runtime dir; jrt's session sockets bound in (ns-private, so they
       # never appear on the host) and ACL'd by the launcher. nixpak's own writes
       # (.flatpak, nixpak-bus, wayland proxy) then land in a dir the app owns.
@@ -154,16 +198,16 @@ let
       ${co}/chmod 700 "${runtimeDir}"
       for __s in ${jrtRuntime}/${waylandSocket} ${jrtRuntime}/pipewire-*; do
         [ -e "$__s" ] || continue
-        # Refuse a symlink or a non-socket: a compromised jrt could plant one in
-        # its own runtime dir to trick root into bind-mounting an arbitrary host file
-        # (e.g. /etc/shadow) into the app's runtime as "wayland-1". Only relay the
-        # real sockets we expect. The wayland name is pinned (not globbed) so jrt
-        # can't win by planting a lexically-earlier socket.
-        [ -L "$__s" ] && continue
-        [ -S "$__s" ] || continue
+        # Refuse a symlink or a non-socket, and detect a swap raced in during the
+        # bind: a compromised jrt could plant a symlink in its own runtime dir to
+        # trick root into bind-mounting an arbitrary host file (e.g. /etc/shadow)
+        # into the app's runtime as "wayland-1". Only relay the real sockets we
+        # expect (the wayland name is pinned, not globbed, so jrt can't win by
+        # planting a lexically-earlier socket), and __bind_checked fails closed on a
+        # mid-bind inode swap.
         __n="$(${co}/basename "$__s")"
         ${co}/touch "${runtimeDir}/$__n"
-        ${ul}/mount --bind "$__s" "${runtimeDir}/$__n" 2>/dev/null || true
+        __bind_checked "$__s" "${runtimeDir}/$__n" S || ${co}/rm -f "${runtimeDir}/$__n" 2>/dev/null || true
       done
       # Pulse: bind ONLY the native socket FILE, never jrt's pulse dir. Reaching a
       # file bound at the app's own path needs no permission on jrt's dir — which
@@ -180,13 +224,14 @@ let
         # Session start can race the socket unit: give native a moment to appear
         # (the file bind can't pick it up later the way the old dir bind did).
         for __i in $(${co}/seq 1 40); do [ -e "$__pn" ] && break; ${co}/sleep 0.05; done
-        # Same symlink/type paranoia as above, on the jrt-controlled leaf.
+        # Same symlink/type paranoia as above, on the jrt-controlled leaf, plus
+        # __bind_checked's mid-bind swap detection.
         if [ -S "$__pn" ] && [ ! -L "$__pn" ]; then
           ${co}/mkdir -p "${runtimeDir}/pulse"
           ${co}/chown "${appUser}" "${runtimeDir}/pulse" 2>/dev/null || true
           ${co}/chmod 700 "${runtimeDir}/pulse"
           ${co}/touch "${runtimeDir}/pulse/native"
-          ${ul}/mount --bind "$__pn" "${runtimeDir}/pulse/native" 2>/dev/null || true
+          __bind_checked "$__pn" "${runtimeDir}/pulse/native" S || ${co}/rm -f "${runtimeDir}/pulse/native" 2>/dev/null || true
         fi
       fi
       # Cross-uid document portal: jrt's doc FUSE lives under jrt's 0700 runtime dir
@@ -206,15 +251,16 @@ let
          && [ ! -L "${jrtRuntime}/doc/by-app" ] \
          && [ ! -L "${jrtRuntime}/doc/by-app/${appId}" ]; then
         ${co}/mkdir -p "${runtimeDir}/doc"
-        ${ul}/mount --bind "${jrtRuntime}/doc/by-app/${appId}" "${runtimeDir}/doc" 2>/dev/null || true
+        # __bind_checked adds mid-bind swap detection on top of the per-component
+        # symlink checks above (a swap of the leaf by-app/<appId> during the bind
+        # changes the bound inode → fail closed).
+        __bind_checked "${jrtRuntime}/doc/by-app/${appId}" "${runtimeDir}/doc" d || ${co}/rmdir "${runtimeDir}/doc" 2>/dev/null || true
       fi
       # D-Bus session bus goes through the jrt-side bridge (started by the launcher),
-      # NOT the raw bus — the app's uid is rejected at D-Bus EXTERNAL auth. Refuse a
-      # symlinked bridge socket ([ -S ] alone would follow one).
-      if [ -S "${bridgeSock}" ] && [ ! -L "${bridgeSock}" ]; then
-        ${co}/touch "${runtimeDir}/bus"
-        ${ul}/mount --bind "${bridgeSock}" "${runtimeDir}/bus" 2>/dev/null || true
-      fi
+      # NOT the raw bus — the app's uid is rejected at D-Bus EXTERNAL auth.
+      # __bind_checked refuses a symlinked bridge socket and detects a mid-bind swap.
+      ${co}/touch "${runtimeDir}/bus"
+      __bind_checked "${bridgeSock}" "${runtimeDir}/bus" S || ${co}/rm -f "${runtimeDir}/bus" 2>/dev/null || true
     ''}
     ${lib.optionalString needsWaylandDisplay ''
       # Pinned, not globbed — see the waylandSocket comment above.
@@ -318,9 +364,50 @@ let
     "QT_QPA_PLATFORMTHEME"
   ];
 
+  # Idempotent removal of every u:app-<name> ACL entry the launcher grants on jrt's
+  # LONG-LIVED objects (session sockets, bridge sock, shared jrt data like the
+  # vault). Called from TWO places: the launcher's trap (as jrt — the fast path)
+  # and the unit's ExecStopPost (as root — authoritative: it fires on unit
+  # deactivation even when the launcher was SIGKILLed/OOM-killed and its trap never
+  # ran, which was the one path that used to leak grants). Both runs are safe and
+  # composable: `setfacl -x` only REMOVES an entry (never grants), so a double run
+  # is a no-op and a jrt-planted symlink can't turn this into an escalation; `-P`
+  # keeps the recursive walk from following a symlink jrt might plant to redirect it
+  # into a large tree (DoS). Entries are per-uid, so removing THIS app's entry never
+  # disturbs another concurrent dedicated app on the same shared socket. The per-app
+  # ~/Downloads/<app> share is deliberately left intact (jrt-owned; its default ACL
+  # keeps saved files jrt-readable). xhost and the bridge are NOT here: xhost needs
+  # jrt's X-session context (root in ExecStopPost has none), and the bridge dies via
+  # --die-with-parent — both stay in the trap. Only meaningful for dedicated apps;
+  # every caller gates on `dedicated`.
+  revokeAclsScript = pkgs.writeShellScript "sandbox-revoke-acls-${appName}" ''
+    for __s in "${jrtRuntime}"/wayland-* "${jrtRuntime}"/pipewire-* "${jrtRuntime}/pulse"; do
+      [ -e "$__s" ] || continue
+      ${acl}/setfacl -R -P -x "u:${appUser}" "$__s" 2>/dev/null || true
+    done
+    ${acl}/setfacl -x "u:${appUser}" "${bridgeSock}" 2>/dev/null || true
+    ${lib.concatMapStringsSep "\n" (p: ''
+      ${acl}/setfacl -R -P -x "u:${appUser}" "${sharedHome}/${p}" 2>/dev/null || true
+      ${acl}/setfacl -x "u:${appUser}" "$(${co}/dirname "${sharedHome}/${p}")" 2>/dev/null || true
+    '') relExtraBinds}
+    ${lib.optionalString (
+      relExtraBinds != [ ]
+    ) ''${acl}/setfacl -x "u:${appUser}" "${sharedHome}" 2>/dev/null || true''}
+  '';
+
   launcher = pkgs.writeShellScriptBin binName ''
     set -eu
     __dbus_pid=""
+    ${lib.optionalString dedicated ''
+      # Gates the trap's ACL revoke below. The unit's ExecStopPost is the
+      # authoritative teardown and has already run by the time `systemctl start
+      # --wait` returns for any launch that REACHED activation (clean quit OR crash).
+      # Only a start that never activated the unit (e.g. a rejected polkit job) skips
+      # ExecStopPost, so this stays 1 until a successful start clears it — then the
+      # trap skips the redundant SECOND recursive setfacl walk over the shared-home
+      # extraBinds trees on the normal-quit path (ExecStopPost already did that walk).
+      __revoke_in_trap=1
+    ''}
     ${lib.optionalString (appCfg.dbusName != "") ''
       # URL/file handling — ONLY for apps that declare a dbusName (URL handlers, e.g.
       # the browser). Every other systemd app skips this entirely and gets the plain
@@ -376,36 +463,17 @@ let
     ${
       if dedicated then
         ''
-          # Revoke (on quit, from the trap) every ACL the grants below add to jrt's
-          # LONG-LIVED objects — the session sockets, the bridge socket, and shared
-          # jrt data (the vault etc.). Without this the app's `u:app-<name>` entry
-          # lingers on jrt's Wayland/PipeWire/Pulse sockets (screen/audio capture) and
-          # on the vault after the app exits, standing access it no longer needs.
-          # Entries are per-uid, so removing THIS app's entry never disturbs another
-          # concurrent dedicated app's grant on the same shared socket. The per-app
-          # ~/Downloads/<app> share is intentionally left intact (purpose-built, jrt-
-          # owned, its default ACL keeps saved files jrt-readable).
-          __revoke_acls() {
-            for __s in "${jrtRuntime}"/wayland-* "${jrtRuntime}"/pipewire-* "${jrtRuntime}/pulse"; do
-              [ -e "$__s" ] || continue
-              ${acl}/setfacl -R -x "u:${appUser}" "$__s" 2>/dev/null || true
-            done
-            ${acl}/setfacl -x "u:${appUser}" "${bridgeSock}" 2>/dev/null || true
-            ${lib.concatMapStringsSep "\n" (p: ''
-              ${acl}/setfacl -R -x "u:${appUser}" "${sharedHome}/${p}" 2>/dev/null || true
-              ${acl}/setfacl -x "u:${appUser}" "$(${co}/dirname "${sharedHome}/${p}")" 2>/dev/null || true
-            '') (lib.filter (p: !(lib.hasPrefix "/" p) && !(lib.hasPrefix "." p)) cfg.sandbox.extraBinds)}
-            ${lib.optionalString (
-              (lib.filter (p: !(lib.hasPrefix "/" p) && !(lib.hasPrefix "." p)) cfg.sandbox.extraBinds) != [ ]
-            ) ''${acl}/setfacl -x "u:${appUser}" "${sharedHome}" 2>/dev/null || true''}
-          }
+          # ACL teardown lives in ${revokeAclsScript} (defined above), invoked from
+          # BOTH the trap below (as jrt, fast path) and the unit's ExecStopPost (as
+          # root, authoritative — so a SIGKILL/OOM of this launcher, which skips the
+          # trap, still gets grants revoked on unit deactivation). See that script.
           # Grant app-${appUser} rw on ONLY the specific session sockets (which the
           # runScript binds into the app's own runtime dir). No ACL on jrt's
           # runtime dir itself → app-${appUser} can't list/create/delete there.
           # Pulse is NOT here: the runScript binds pulse/native (a 0666 socket)
           # directly, and an ACL on jrt's pulse DIR is a trap — jrt-side libpulse
           # clients chmod that dir 0700, zeroing the ACL mask (see runScript).
-          # (__revoke_acls still sweeps pulse to clean entries from older builds.)
+          # (revokeAclsScript still sweeps pulse to clean entries from older builds.)
           for __s in "${jrtRuntime}"/wayland-* "${jrtRuntime}"/pipewire-*; do
             [ -e "$__s" ] || continue
             # Mirror the root-side relay checks: never ACL a symlink or a non-socket/
@@ -454,7 +522,7 @@ let
             ${acl}/setfacl -m "u:${appUser}:x" "${sharedHome}" 2>/dev/null || true
             ${acl}/setfacl -m "u:${appUser}:x" "$(${co}/dirname "${sharedHome}/${p}")" 2>/dev/null || true
             ${acl}/setfacl -R -m "u:${appUser}:rwX" "${sharedHome}/${p}" 2>/dev/null || true
-          '') (lib.filter (p: !(lib.hasPrefix "/" p) && !(lib.hasPrefix "." p)) cfg.sandbox.extraBinds)}
+          '') relExtraBinds}
           ${lib.optionalString cfg.sandbox.sharedDownloads ''
             # Per-app shared downloads: let the app uid reach ~/Downloads/${appName}
             # (traverse ~ and ~/Downloads, rw the per-app subdir). A default ACL makes
@@ -480,14 +548,23 @@ let
       lib.optionalString (
         dedicated && cfg.sandbox.x11Forward
       ) "${xhost} -SI:localuser:${appUser} >/dev/null 2>&1 || true; "
-    }${lib.optionalString dedicated "__revoke_acls; "}if [ -n "$__dbus_pid" ]; then kill "$__dbus_pid" 2>/dev/null || true; fi; ${pkgs.systemd}/bin/systemctl stop ${unitName}.service >/dev/null 2>&1 || true' EXIT INT TERM
+    }${lib.optionalString dedicated "if [ \"$__revoke_in_trap\" = 1 ]; then ${revokeAclsScript}; fi; "}if [ -n "$__dbus_pid" ]; then kill "$__dbus_pid" 2>/dev/null || true; fi; ${pkgs.systemd}/bin/systemctl stop ${unitName}.service >/dev/null 2>&1 || true' EXIT INT TERM
     ${lib.optionalString (dedicated && cfg.sandbox.x11Forward) ''
       # Grant the dedicated app uid access to jrt's X server via server-interpreted
       # localuser auth (no Xauthority cookie needed). Revoked in the trap above. Shares
       # jrt's X — see nixos/modules/apps/xwayland-forward.md for the caveats.
       ${xhost} +SI:localuser:${appUser} >/dev/null 2>&1 || true
     ''}
-    ${pkgs.systemd}/bin/systemctl start --wait ${unitName}.service
+    __rc=0
+    ${pkgs.systemd}/bin/systemctl start --wait ${unitName}.service || __rc=$?
+    ${lib.optionalString dedicated ''
+      # Successful start ⇒ the unit reached activation and its ExecStopPost has
+      # already revoked, so disarm the trap's revoke to avoid a second walk. A failed
+      # start may be a rejected job that never activated (ExecStopPost never ran), so
+      # leave the trap armed to guarantee teardown in that path.
+      if [ "$__rc" = 0 ]; then __revoke_in_trap=0; fi
+    ''}
+    exit "$__rc"
   '';
 
   finalPkg = pkgs.runCommand "${appName}-stash" { } ''
@@ -505,7 +582,11 @@ let
 
   # ptrace_scope hardening baseline for the SAME-UID stash (blocks ATTACH memory
   # scraping). It does NOT hide the stash via /proc/<pid>/root — dedicated does.
-  ptraceAssertion = lib.optional (cfg.sandbox.stashOwner == "root") {
+  # Gate on `!dedicated`, the real same-uid systemd condition. (This used to key on
+  # a cfg.sandbox.stashOwner option, since removed: the effective stash owner is now
+  # derived from dedicatedUser at lowering in lib/apps.nix, and the old option was a
+  # dead knob that made this assertion inert.) Matches injectAssertion's `!dedicated`.
+  ptraceAssertion = lib.optional (!dedicated) {
     assertion = builtins.toString (config.boot.kernel.sysctl."kernel.yama.ptrace_scope" or 0) != "0";
     message = ''
       sandbox app '${appName}' uses the systemd same-uid stash. Set
@@ -614,6 +695,16 @@ in
         ++ lib.optionals dedicated [
           "LANG=${config.i18n.defaultLocale}"
         ];
+      }
+      # Authoritative ACL teardown on unit deactivation, as root (no User= on this
+      # unit → ExecStopPost runs as root, which can setfacl -x jrt's files). This is
+      # the net for the one case the launcher's trap misses: a SIGKILL/OOM of the
+      # launcher, after which the app self-exits and the unit deactivates with the
+      # grants still on jrt's sockets. `-` so a revoke hiccup never marks the unit
+      # failed; the script is idempotent so it composes with the trap's own run on a
+      # clean quit. (xhost/bridge stay in the trap — see revokeAclsScript.)
+      // lib.optionalAttrs dedicated {
+        ExecStopPost = "-${revokeAclsScript}";
       }
       # Only the same-uid inject mode reads a jrt-written env file; dedicated NEVER
       # does (that would be an LD_PRELOAD injection into a different-uid process).

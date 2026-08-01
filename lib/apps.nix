@@ -98,20 +98,6 @@
             description = "systemd backend only, CLI apps only: run under a dedicated app-<name> uid.";
           };
 
-          stashOwner = lib.mkOption {
-            type = lib.types.enum [
-              "user"
-              "root"
-              "dedicated"
-            ];
-            default = "user";
-            description = ''
-              Per-app stash ownership. "user" = jrt-owned (rootless nixpak). The
-              systemd backend derives root/dedicated from backend+dedicatedUser at
-              lowering time (Phase 2); see lib/storage.nix.
-            '';
-          };
-
           envMode = lib.mkOption {
             type = lib.types.enum [
               "inject"

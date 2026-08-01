@@ -9,7 +9,6 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    nix-bwrapper.url = "github:Naxdy/nix-bwrapper";
     ccusage = {
       url = "github:ccusage/ccusage";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -20,10 +19,6 @@
       # sandbox-xdg-runtime-dir.
       url = "github:otisdog8/nixpak/hard-bind";
       inputs.nixpkgs.follows = "nixpkgs";
-    };
-    xdg-desktop-portal-src = {
-      url = "github:otisdog8/xdg-desktop-portal/fallback-improvements-120";
-      flake = false;
     };
     nixpkgs-older.url = "github:NixOS/nixpkgs?rev=3e042434c17eff8ed5528faa4c4503facc2bdf6c";
     # nixpkgs-unstable branch: carries fixes ahead of the nixos-* channels
@@ -94,12 +89,6 @@
       url = "github:nix-community/nixvim";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    Hyprspace = {
-      url = "github:KZDKM/Hyprspace";
-
-      # Hyprspace uses latest Hyprland. We declare this to keep them in sync.
-      inputs.hyprland.follows = "hyprland";
-    };
     hyprsplit = {
       url = "github:shezdy/hyprsplit/main";
       inputs.hyprland.follows = "hyprland";
@@ -124,7 +113,6 @@
       zen-browser,
       hyprland,
       hyprsplit,
-      Hyprspace,
       ...
     }@inputs:
 

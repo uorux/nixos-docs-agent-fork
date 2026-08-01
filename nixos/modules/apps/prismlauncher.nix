@@ -67,10 +67,13 @@
                 "/nix/var/nix/profiles"
               ];
 
-              dev = [
-                # Input devices (for controllers)
-                "/dev/input"
-              ];
+              # NOTE: /dev/input is deliberately NOT bound. Binding all evdev nodes
+              # would hand the sandbox the same raw keyboard/mouse read surface
+              # steam.nix documents as avoided (keylogging), and app-prismlauncher
+              # isn't in the `input` group anyway so controllers over /dev/input
+              # wouldn't have worked. Controller support, if needed later, should go
+              # through a narrower path (a specific joystick node), not all of
+              # /dev/input.
             };
           }
         )

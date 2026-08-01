@@ -96,7 +96,9 @@ let
     "gitea-rgw"
   ];
   # How long overwritten/deleted objects survive in archive/ — the undo window.
-  archiveMaxAge = "90d";
+  # Days (int), not an rclone age string: the prune keys on the archive DATE
+  # directory, not file modtime (see the prune loop for why --min-age was wrong).
+  archiveMaxAgeDays = 90;
 in
 {
   # ── Secrets ─────────────────────────────────────────────────────────────────
@@ -137,14 +139,29 @@ in
     paths = [
       "/mnt/bcachefs/k8s/Immich"
       "/mnt/bcachefs/backups"
+      # Minecraft worlds used to live here too, but were split into their own
+      # `restic.backups.mc` job below — see that job for why (HDD-gating + snapshot
+      # consistency).
+    ];
+    # Tag this job's snapshots so `forget`'s keep-policy only ages THESE — the mc job
+    # shares the same repo and prunes its own `mc` tag independently. --retry-lock
+    # makes a run WAIT OUT (rather than fail against) a lock held by the mc job or the
+    # monthly drill instead of erroring "repository is already locked".
+    extraBackupArgs = [
+      "--tag=s4"
+      "--retry-lock=15m"
     ];
     pruneOpts = [
+      "--tag=s4"
       "--keep-daily 14"
       "--keep-weekly 8"
       "--keep-monthly 12"
+      "--retry-lock=15m"
     ];
-    # Structural (metadata-only) repo check after each run. For an occasional
-    # data spot-check add "--read-data-subset=1%" to checkOpts — costs egress.
+    # Structural (metadata-only) repo check after each run, over the WHOLE repo (so it
+    # covers the mc job's data too). For an occasional data spot-check the monthly
+    # drill pulls --read-data-subset — costs egress.
+    checkOpts = [ "--retry-lock=15m" ];
     runCheck = true;
     timerConfig = {
       OnCalendar = "03:00";
@@ -161,7 +178,83 @@ in
     ConditionPathIsMountPoint = "/mnt/bcachefs";
   };
 
-  # The module pins RESTIC_CACHE_DIR=/var/cache/restic-backups-s4, and /var is
+  # ── restic /mc → S4 (own job, shared repo) ───────────────────────────────────
+  # Minecraft worlds — the only off-host copy (btrbk snapshots share the same single
+  # NVMe pool, so a pool loss takes worlds + history together). Split out of the s4
+  # job above for two reasons:
+  #   1. Gating: the s4 job is gated on the /mnt/bcachefs HDD (Immich/backups live
+  #      there). /mc lives on the always-present NVMe root pool, so folding it into
+  #      that job meant a missing HDD SILENTLY skipped the worlds too (a condition
+  #      skip is `inactive`, not `failed`, so it never paged). This job isn't gated
+  #      on the HDD, so worlds back up regardless of the media disk.
+  #   2. Consistency: worlds are backed up from the latest btrbk SNAPSHOT, not the
+  #      live /mc, so restic captures a frozen, internally-consistent point-in-time
+  #      view (no torn region files while the servers are mid-write).
+  # Same repo/bucket/password as s4; a per-job --tag scopes each job's forget policy
+  # to its own snapshots. The s4 job's structural check + the monthly drill's
+  # read-data-subset both run over the shared repo and cover this job's data, so
+  # there's no second exclusive `restic check` here.
+  services.restic.backups.mc = {
+    repositoryFile = config.sops.secrets."restic-s4-repo".path;
+    passwordFile = config.sops.secrets."restic-s4-password".path;
+    environmentFile = config.sops.secrets."s4-backups/env".path;
+    initialize = true;
+    # Newest btrbk snapshot of the mc subvol. btrbk names them mc.<YYYYMMDDThhmm> (a
+    # fixed-width UTC stamp, so lexical sort == chronological), landing in
+    # /mnt/btrfs_root/btrbk_snapshots (snapshots.nix default). Fail loudly if none
+    # exists yet rather than silently backing up nothing. Needs a shebang: the restic
+    # module execs this script directly (writeScript adds none).
+    dynamicFilesFrom = ''
+      #!${pkgs.runtimeShell}
+      set -euo pipefail
+      latest=$(${pkgs.coreutils}/bin/ls -1d /mnt/btrfs_root/btrbk_snapshots/mc.* 2>/dev/null \
+        | ${pkgs.coreutils}/bin/sort \
+        | ${pkgs.coreutils}/bin/tail -n1 || true)
+      if [ -z "$latest" ]; then
+        echo "restic mc backup: no btrbk snapshot under /mnt/btrfs_root/btrbk_snapshots (mc.*)" >&2
+        exit 1
+      fi
+      echo "$latest"
+    '';
+    extraBackupArgs = [
+      "--tag=mc"
+      "--retry-lock=15m"
+    ];
+    pruneOpts = [
+      "--tag=mc"
+      # Group the mc series by HOST, overriding restic's default `host,paths`. The
+      # backed-up path is the btrbk snapshot dir mc.<YYYYMMDDThhmm>, which is UNIQUE
+      # per run — under the default grouping every snapshot would be its own group of
+      # one and the keep-policy would prune NOTHING, growing the repo without bound.
+      # All mc snapshots share host=recusant (and the --tag=mc filter already scopes
+      # forget to this series), so grouping by host treats them as one retention set.
+      "--group-by=host"
+      "--keep-daily 14"
+      "--keep-weekly 8"
+      "--keep-monthly 12"
+      "--retry-lock=15m"
+    ];
+    # No runCheck: the s4 job's check + the monthly drill cover the shared repo; a
+    # second exclusive check would only add lock contention.
+    runCheck = false;
+    timerConfig = {
+      # Ahead of the s4 backup (03:00) so their exclusive forget/prune locks don't
+      # stack; --retry-lock absorbs any residual overlap.
+      OnCalendar = "02:00";
+      RandomizedDelaySec = "30m";
+      Persistent = true;
+    };
+  };
+
+  # /mc is on the NVMe root pool (always present), NOT the bcachefs HDD, so this job
+  # is deliberately NOT gated on /mnt/bcachefs — decoupling worlds from the media
+  # disk is the whole point of splitting it out. It reads btrbk snapshots under
+  # /mnt/btrfs_root.
+  systemd.services."restic-backups-mc".unitConfig = {
+    RequiresMountsFor = [ "/mnt/btrfs_root" ];
+  };
+
+  # The module pins RESTIC_CACHE_DIR=/var/cache/restic-backups-<name>, and /var is
   # ephemeral on this host — persist it or every reboot re-downloads the repo
   # index/metadata from S4. Runs as root (no DynamicUser), so a plain path
   # works; no /var/lib/private dance like garage needed.
@@ -170,7 +263,88 @@ in
       directory = "/var/cache/restic-backups-s4";
       mode = "0700";
     }
+    {
+      directory = "/var/cache/restic-backups-mc";
+      mode = "0700";
+    }
   ];
+
+  # ── restic restore DRILL ─────────────────────────────────────────────────────
+  # Proves the off-site repo is actually RESTORABLE, not merely that backups run
+  # (the classic untested-backup trap). On ANY failure the unit exits non-zero and
+  # enters `failed`, which the k8s Prometheus systemd-unit alerting already scrapes
+  # off recusant's node-exporter — so a broken/undecryptable/empty repo pages
+  # instead of being discovered the day it's needed. Two checks:
+  #   1. snapshots exist (catches a backup that silently stopped landing);
+  #   2. `restic check --read-data-subset=1%` pulls a random 1% of PACK DATA from S4
+  #      and verifies it decrypts + hashes clean — the real "the key opens real
+  #      data" proof that the metadata-only runCheck on the backup can't give, at
+  #      bounded egress. This IS the restore-path exercise: it reads, decrypts and
+  #      hashes real repo data. A full `restic restore` isn't used because the
+  #      largest source (/mc worlds) is >100 GB — restoring it would blow the unit's
+  #      tmpfs PrivateTmp and pull the whole tree from S4 every month.
+  # Reuses the backup's repo/password/creds and its PERSISTED cache (so it doesn't
+  # re-pull the whole index each run). Pulls FROM S4 only → no local-mount gating,
+  # so unlike the backup it still runs (and can still verify history) when the
+  # bcachefs HDD is absent.
+  systemd.services.restic-restore-drill-s4 = {
+    description = "Restore drill: verify the S4 restic repo is restorable";
+    wants = [ "network-online.target" ];
+    after = [ "network-online.target" ];
+    path = [
+      pkgs.restic
+      pkgs.coreutils
+      pkgs.gnugrep
+    ];
+    environment = {
+      RESTIC_REPOSITORY_FILE = config.sops.secrets."restic-s4-repo".path;
+      RESTIC_PASSWORD_FILE = config.sops.secrets."restic-s4-password".path;
+      # Share the backup's persisted index/metadata cache (root-owned 0700).
+      RESTIC_CACHE_DIR = "/var/cache/restic-backups-s4";
+    };
+    serviceConfig = {
+      Type = "oneshot";
+      # AWS_* creds for the S3 backend (same dotenv the backup uses).
+      EnvironmentFile = config.sops.secrets."s4-backups/env".path;
+      # Runs as root (default): needs the 0700 root-owned restic cache the backup
+      # persists. PrivateTmp isolates whatever scratch `restic check` writes.
+      PrivateTmp = true;
+    };
+    script = ''
+      set -euo pipefail
+      # ONE snapshots call: the assignment fails loudly under set -e on a repo that's
+      # unreachable / wrong-key / missing-cred, and its captured output feeds the
+      # presence check below. Do NOT `restic snapshots --json | grep -q`: grep -q
+      # exits at the first match, and once the JSON tops the pipe buffer restic dies
+      # on SIGPIPE (exit 141) which pipefail would turn into a FALSE "NO snapshots"
+      # failure on a healthy repo. --retry-lock waits out the backup/drill locks.
+      snapshots_json="$(restic --retry-lock=15m snapshots --json)"
+      # 1. Backups must actually exist.
+      if ! ${pkgs.gnugrep}/bin/grep -q '"short_id"' <<<"$snapshots_json"; then
+        echo "restore drill: NO snapshots in the S4 repo — backups are not landing" >&2
+        exit 1
+      fi
+      # 2. Data-integrity + restore-path proof: pull, decrypt and hash-verify a random
+      #    1% of pack data from S4 (see the header for why this replaces a full /mc
+      #    restore).
+      restic --retry-lock=15m check --read-data-subset=1%
+      echo "restore drill OK: snapshots present, 1% pack data pulled + verified clean"
+    '';
+  };
+  systemd.timers.restic-restore-drill-s4 = {
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      # First of the month at midday, deliberately clear of the backup windows (mc
+      # 02:00±30m, s4 03:00±1h, rclone 04:30±30m). The drill's `restic check` takes an
+      # EXCLUSIVE repo lock, so keeping it off the 02:00–05:00 band — plus --retry-lock
+      # in the script — avoids a lock collision that would fail either the drill or a
+      # backup and page spuriously. Monthly bounds the 1%-read egress while still
+      # catching a repo that has gone bad well before it's actually needed.
+      OnCalendar = "*-*-01 12:00:00";
+      RandomizedDelaySec = "2h";
+      Persistent = true;
+    };
+  };
 
   # ── rclone Garage → S4 ──────────────────────────────────────────────────────
   # Remotes are defined purely via env vars — no rclone.conf anywhere (rclone
@@ -246,13 +420,42 @@ in
           echo "sync of bucket $bucket failed (rclone exit $rc)" >&2
           fail=1
         fi
-        # Age out the archive; --rmdirs clears the emptied date dirs.
+        # Age out the archive BY DATE DIRECTORY, not by file modtime. The S4CRYPT
+        # remote preserves each object's ORIGINAL modtime, so `rclone delete
+        # --min-age` measured age from when the object was first written — often
+        # long before it was archived — and deleted freshly-archived history on
+        # the very next run, gutting the ${toString archiveMaxAgeDays}-day undo
+        # window this leg exists for (the bucket-wipe recovery scenario). The sync
+        # above lays the archive out as archive/<YYYY-MM-DD>/ (its `date +%F`), so
+        # prune whole date dirs whose date is older than the cutoff. lsf sees the
+        # plaintext date names through the crypt remote.
+        cutoff=$(date -d '${toString archiveMaxAgeDays} days ago' +%Y%m%d)
         rc=0
-        rclone delete "S4CRYPT:$bucket/archive" \
-          --min-age ${archiveMaxAge} --rmdirs --log-level INFO || rc=$?
-        if [ "$rc" -ne 0 ]; then
-          echo "archive prune of bucket $bucket failed (rclone exit $rc)" >&2
+        archive_days=$(rclone lsf --dirs-only "S4CRYPT:$bucket/archive/" 2>/dev/null) || rc=$?
+        if [ "$rc" -eq 3 ]; then
+          : # exit 3 = directory not found: no archive dir yet (nothing overwritten
+            # or deleted has ever been synced) — nothing to prune.
+        elif [ "$rc" -ne 0 ]; then
+          echo "archive list of bucket $bucket failed (rclone exit $rc)" >&2
           fail=1
+        else
+          for d in $archive_days; do
+            day=''${d%/}
+            # Only ever touch YYYY-MM-DD dirs; skip anything unexpected in archive/.
+            case "$day" in
+              [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+              *) continue ;;
+            esac
+            # Lexical/numeric compare of YYYYMMDD (dashes stripped) — ISO dates
+            # order chronologically, so "older than cutoff" is a plain <.
+            [ "''${day//-/}" -lt "$cutoff" ] || continue
+            prc=0
+            rclone purge "S4CRYPT:$bucket/archive/$day" --log-level INFO || prc=$?
+            if [ "$prc" -ne 0 ]; then
+              echo "archive prune of $bucket/archive/$day failed (rclone exit $prc)" >&2
+              fail=1
+            fi
+          done
         fi
       done
       exit $fail

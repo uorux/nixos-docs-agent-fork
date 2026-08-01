@@ -1,0 +1,127 @@
+diff --git a/document-portal/document-portal.c b/document-portal/document-portal.c
+index f3bd2ba..2336820 100644
+--- a/document-portal/document-portal.c
++++ b/document-portal/document-portal.c
+@@ -37,6 +37,7 @@
+ #include <gio/gio.h>
+ #include <gio/gunixfdlist.h>
+ #include "glib-backports.h"
++#include <json-glib/json-glib.h>
+ #include "document-portal-dbus.h"
+ #include "document-store.h"
+ #include "src/xdp-app-info.h"
+@@ -566,6 +567,79 @@ metadata_check_file_access (const char *keyfile_path,
+     }
+ }
+ 
++/* Helper: Stat a file in a PID's mount namespace */
++static gboolean
++stat_in_pid_namespace (pid_t pid, const char *path, struct stat *st_buf)
++{
++  g_autofree char *proc_root_path = NULL;
++
++  /* Construct path as it appears in the app's mount namespace */
++  proc_root_path = g_strdup_printf ("/proc/%u/root%s", pid, path);
++
++  return stat (proc_root_path, st_buf) == 0;
++}
++
++/* Helper: Get PIDs for a given app_id by scanning runtime directories */
++static GPtrArray *
++get_pids_for_app_id (const char *app_id)
++{
++  g_autoptr(GPtrArray) pids = g_ptr_array_new ();
++  g_autofree char *flatpak_dir = NULL;
++  g_autoptr(GDir) dir = NULL;
++  const char *name;
++
++  /* Scan flatpak instances in $XDG_RUNTIME_DIR/.flatpak/ */
++  flatpak_dir = g_build_filename (g_get_user_runtime_dir (), ".flatpak", NULL);
++  dir = g_dir_open (flatpak_dir, 0, NULL);
++
++  if (!dir)
++    return g_steal_pointer (&pids);
++
++  if (dir)
++    {
++      while ((name = g_dir_read_name (dir)) != NULL)
++        {
++          g_autofree char *info_path = NULL;
++          g_autofree char *bwrap_path = NULL;
++          g_autoptr(GKeyFile) info = NULL;
++          g_autofree char *instance_app_id = NULL;
++
++          /* Read info to get app-id */
++          info_path = g_build_filename (flatpak_dir, name, "info", NULL);
++          info = g_key_file_new ();
++
++          if (g_key_file_load_from_file (info, info_path, G_KEY_FILE_NONE, NULL))
++            {
++              instance_app_id = g_key_file_get_string (info, "Application", "name", NULL);
++
++              if (instance_app_id && g_strcmp0 (instance_app_id, app_id) == 0)
++                {
++                  /* Read bwrapinfo.json to get child-pid */
++                  bwrap_path = g_build_filename (flatpak_dir, name, "bwrapinfo.json", NULL);
++                  g_autofree char *bwrap_contents = NULL;
++
++                  if (g_file_get_contents (bwrap_path, &bwrap_contents, NULL, NULL))
++                    {
++                      g_autoptr(JsonParser) parser = json_parser_new ();
++
++                      if (json_parser_load_from_data (parser, bwrap_contents, -1, NULL))
++                        {
++                          JsonNode *node = json_parser_get_root (parser);
++                          JsonObject *obj = json_node_get_object (node);
++                          gint64 child_pid = json_object_get_int_member (obj, "child-pid");
++
++                          if (child_pid > 0)
++                            g_ptr_array_add (pids, GINT_TO_POINTER ((int)child_pid));
++                        }
++                    }
++                }
++            }
++        }
++    }
++
++  return g_steal_pointer (&pids);
++}
++
+ /* This is a simplified version that only looks at filesystem=host and
+  * filesystem=home, as such it should not cause false positives, but
+  * be may create a document for files that the app should have access
+@@ -622,6 +696,34 @@ app_has_file_access_fallback (const char *target_app_id,
+        (allow_home == 1 && (target_perms & DOCUMENT_PERMISSION_FLAGS_WRITE) == 0)))
+     return TRUE;
+ 
++  /* Check if file is accessible via inode comparison */
++  {
++    struct stat host_st;
++    g_autoptr(GPtrArray) pids = NULL;
++
++    /* Stat the file on the host */
++    if (stat (path, &host_st) != 0)
++      return FALSE;
++
++    /* Find all running instances of target_app_id */
++    pids = get_pids_for_app_id (target_app_id);
++
++    for (guint i = 0; i < pids->len; i++)
++      {
++        pid_t pid = GPOINTER_TO_INT (g_ptr_array_index (pids, i));
++        struct stat app_st;
++
++        /* Stat the file as it appears in the app's mount namespace */
++        if (stat_in_pid_namespace (pid, path, &app_st))
++          {
++            /* If device and inode match, the file is the same */
++            if (host_st.st_dev == app_st.st_dev &&
++                host_st.st_ino == app_st.st_ino)
++              return TRUE;
++          }
++      }
++  }
++
+   return FALSE;
+ }
+ 

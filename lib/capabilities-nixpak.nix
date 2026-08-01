@@ -10,7 +10,26 @@
 # nixpak-pkg.nix (an "off unless asked" default). A plain `true` here is priority
 # 100 (higher than 999), so `mkIf caps.network { ... network = true }` wins — same
 # mechanism the old network.nix feature relied on.
-{ lib }:
+{
+  lib,
+  # Device nodes the `gpu` capability binds. Default: every GPU on the host.
+  # Multi-GPU hosts where only one card drives the display should narrow this
+  # via modules.sandbox.gpuDevices (threaded through both backends): chromium's
+  # Wayland path opens the FIRST openable /dev/dri/renderD* and NVIDIA's Vulkan
+  # ICD enumerates every /dev/nvidia*, so a visible compute-only card gets
+  # picked for buffer allocation while the compositor/window lives on the
+  # display card — cross-GPU dmabuf import then fails on every frame
+  # (EGL_BAD_ALLOC / VK_ERROR_OUT_OF_DEVICE_MEMORY → context-lost loop).
+  gpuDevices ? [
+    "/dev/dri"
+    "/dev/nvidia0"
+    "/dev/nvidia1"
+    "/dev/nvidiactl"
+    "/dev/nvidia-modeset"
+    "/dev/nvidia-uvm"
+    "/dev/nvidia-uvm-tools"
+  ],
+}:
 caps:
 {
   config,
@@ -39,20 +58,22 @@ lib.mkMerge [
   })
 
   (lib.mkIf caps.gpu {
-    bubblewrap.bind.dev = [
-      "/dev/dri"
-      "/dev/nvidia0"
-      "/dev/nvidiactl"
-      "/dev/nvidia-modeset"
-      "/dev/nvidia-uvm"
-      "/dev/nvidia-uvm-tools"
-    ];
+    bubblewrap.bind.dev = gpuDevices;
     bubblewrap.bind.rw = [
       "/sys/dev/char"
       "/sys/devices"
       "/sys/class/drm"
     ];
     bubblewrap.bind.ro = [
+      # NVIDIA userspace resolves GPUs through /sys/bus/pci/devices symlinks and
+      # reads /sys/module/nvidia_drm/parameters/modeset to detect GBM/dmabuf
+      # support. Without these, dmabuf import into EGL/Vulkan fails on every
+      # frame (eglCreateImage EGL_BAD_ALLOC / VK_ERROR_OUT_OF_DEVICE_MEMORY →
+      # context-lost loop). Flatpak binds all of /sys/bus + /sys/class; we add
+      # the two specific subtrees to avoid overlapping the /sys/class/drm rw
+      # bind above.
+      "/sys/bus/pci"
+      "/sys/module"
       "/run/opengl-driver"
       "/run/opengl-driver-32"
       "/etc/static/egl"

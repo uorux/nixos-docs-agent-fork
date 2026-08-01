@@ -24,6 +24,7 @@
         storage
         ;
       stashAtHome = false;
+      gpuDevices = config.modules.sandbox.gpuDevices;
     }).package;
   systemConfig = {
     systemd.tmpfiles.rules = storage.tmpfilesRules;

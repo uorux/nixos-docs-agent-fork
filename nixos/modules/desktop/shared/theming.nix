@@ -44,11 +44,17 @@ in
         nwg-look
       ];
 
+      # Theme DATA (share/themes/Sweet/…, share/Kvantum, share/icons) must be in the
+      # system profile so it resolves both on the host and when gui.nix binds
+      # /run/current-system/sw/<path> into sandboxes. Without this the theme NAME is
+      # set but the files aren't found → silent Adwaita fallback. These entries are
+      # the SAME list gui.nix binds (lib/sandbox-theme-paths.nix), imported here so
+      # the two can't drift apart. /share/pixmaps is theming-local (gui.nix doesn't
+      # bind it), so it stays inline.
       pathsToLink = [
-        "/share/Kvantum"
-        "/share/icons"
         "/share/pixmaps"
-      ];
+      ]
+      ++ import ../../../../lib/sandbox-theme-paths.nix;
 
       # Persistence for theming
       persistence."/persist" = {
@@ -72,12 +78,17 @@ in
         iconTheme = {
           name = "candy-icons";
         };
+        # The "Sweet" theme lives in pkgs.sweet — NOT gnome-themes-extra (which
+        # only ships Adwaita/Adwaita-dark/HighContrast), so the old package
+        # reference meant GTK found no "Sweet" dir and silently fell back to
+        # Adwaita. gnome-themes-extra stays installed (systemPackages) for the
+        # Adwaita fallback + libadwaita bits.
         theme = {
-          package = pkgs.gnome-themes-extra;
+          package = pkgs.sweet;
           name = "Sweet";
         };
         gtk4.theme = {
-          package = pkgs.gnome-themes-extra;
+          package = pkgs.sweet;
           name = "Sweet";
         };
       };

@@ -40,6 +40,17 @@ in
             ignore_systemd_inhibit = false;
             lock_cmd = "sudo -K && hyprlock";
             unlock_cmd = "pkill -USR1 hyprlock && rm -f ${idleFlag}";
+            # Lock on EVERY suspend path, not just the idle ladder. Without this,
+            # a suspend triggered outside the idle timeouts — lid close, manual
+            # `systemctl suspend`, the AC-unplug udev rule (laptop.nix) — sleeps
+            # the machine UNLOCKED, so it wakes straight to the desktop (a
+            # data-exposure gap, sharper here given impermanence + at-rest
+            # secrets). hypridle takes a logind sleep-delay inhibitor while
+            # before_sleep_cmd runs, giving hyprlock time to grab the screen
+            # before the machine actually suspends; after_sleep_cmd repaints the
+            # display on resume so it isn't left blanked behind the lock.
+            before_sleep_cmd = "loginctl lock-session";
+            after_sleep_cmd = "hyprctl dispatch dpms on";
           };
 
           listener = [
