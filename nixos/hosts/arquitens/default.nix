@@ -97,6 +97,14 @@
     };
   };
 
+  # Netconsole collector + sender come from the k3s module. This host is the
+  # fleet's default collector target (10.0.0.10), so its own kernel log must go
+  # elsewhere — carrack.
+  modules.system.netconsole = {
+    collectorIp = "10.0.0.11"; # carrack
+    collectorMac = "00:24:27:88:a9:bc";
+  };
+
   # NFS server removed: it exported /tmp rw to the whole 100.0.0.0/8 with
   # insecure + all_squash — a world-writable system dir served to the tailnet (and
   # then some, given the /8). Nothing mounts it. Re-add as a dedicated export dir

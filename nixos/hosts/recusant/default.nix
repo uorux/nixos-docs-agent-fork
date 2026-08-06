@@ -138,43 +138,17 @@
   '';
   networking.firewall.allowedTCPPorts = [ 2049 ];
 
-  # Prometheus exporters
-  services.prometheus.exporters.node = {
-    enable = true;
-    # bcachefs collector is default-enabled in node_exporter 1.11.1; listed
-    # explicitly to document intent. Reads /sys/fs/bcachefs (root-only files),
-    # which works since the exporter runs as root (DynamicUser = false).
-    # systemd:    per-unit state (failed/active) across all units.
-    # processes:  aggregate process/thread counts by state.
-    # interrupts/softirqs: per-CPU IRQ/softirq counts — spot IRQ storms.
-    # ethtool:    NIC driver stats (drops/errors/ring).
-    # qdisc:      network queueing-discipline stats (needs AF_NETLINK).
-    # tcpstat:    TCP socket-state counts from /proc/net/tcp.
-    # (PSI `pressure` collector is on by default → node_pressure_{cpu,memory,io}_*.)
-    enabledCollectors = [
-      "bcachefs"
-      "systemd"
-      "processes"
-      "interrupts"
-      "softirqs"
-      "ethtool"
-      "qdisc"
-      "tcpstat"
-    ];
-  };
+  # Ship kernel logs to the netconsole collector (arquitens) — this box hosts
+  # enough state (garage, media, minecraft, agents) that its panics are worth
+  # capturing.
+  modules.system.netconsole.enable = true;
 
-  # Keep the exporter scrapeable when the host is under memory/CPU/IO pressure —
-  # exactly when its metrics matter most. The module already sets Restart=always;
-  # this adds OOM protection + scheduling priority + a cgroup memory floor.
-  # (RestrictRealtime=true is hard-set by the module, so use Nice + best-effort
-  # IO rather than a realtime class.)
-  systemd.services.prometheus-node-exporter.serviceConfig = {
-    OOMScoreAdjust = -900; # kernel OOM-killer avoids it
-    Nice = -5; # CPU priority under load
-    IOSchedulingClass = "best-effort";
-    IOSchedulingPriority = 0; # disk collectors don't stall behind IO pressure
-    MemoryLow = "48M"; # cgroup reclaim floor so it isn't evicted
-  };
+  # node_exporter itself comes from modules/system/node-exporter.nix (fleet-wide).
+  # bcachefs collector is default-enabled in node_exporter 1.11.1; listed
+  # explicitly to document intent. Reads /sys/fs/bcachefs (root-only files),
+  # which works since the exporter runs as root (DynamicUser = false).
+  modules.system.node-exporter.extraCollectors = [ "bcachefs" ];
+
   services.prometheus.exporters.smartctl = {
     enable = true;
     devices = [ ];

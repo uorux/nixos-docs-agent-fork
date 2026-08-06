@@ -116,6 +116,17 @@ in
       ];
     };
 
+    # Every cluster node is both a netconsole sender and a collector (vector ->
+    # VictoriaLogs via the local NodePort): these are exactly the hosts whose
+    # panics take workloads down, and with all three collecting, each node can
+    # target a collector that isn't itself — so no node's crash goes missing.
+    # (arquitens overrides the default target, itself, to carrack in its host
+    # config; a module assertion catches send-to-self.)
+    modules.system.netconsole = {
+      enable = lib.mkDefault true;
+      collector.enable = lib.mkDefault true;
+    };
+
     environment.systemPackages = with pkgs; [
       k3s
     ];

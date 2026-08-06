@@ -37,6 +37,10 @@
     modules/system/secureboot.nix
     modules/system/ydotool.nix
     modules/system/storage-health.nix
+    # node-exporter defaults itself on fleet-wide (k3s-aware; binds the tailnet
+    # IP only). netconsole is opt-in: k3s module + recusant/galaxy enable it.
+    modules/system/node-exporter.nix
+    modules/system/netconsole.nix
 
     # System modules (conditionally enabled)
     modules/system/ceph-osd-disk.nix

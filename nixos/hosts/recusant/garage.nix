@@ -78,6 +78,16 @@ in
       # Database engine - LMDB is recommended for performance
       db_engine = "lmdb";
 
+      # Both default to FALSE: garage acks writes before they hit disk, so a
+      # crash loses acked blocks. With replication_factor = 1 there is no
+      # replica to resync a lost block from — an unclean shutdown on
+      # 2026-07-31 left three cnpg WAL blocks as zero-length files, which
+      # permanently destroyed those objects and broke the S4 mirror sync
+      # (garage-corrupt-blocks incident). fsync is the only durability this
+      # node has; the write-throughput cost is acceptable for backup traffic.
+      data_fsync = true;
+      metadata_fsync = true;
+
       # Compression for stored blocks
       compression_level = 1;
 

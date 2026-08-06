@@ -75,6 +75,12 @@
     # Enable gaming bundle
     bundles.gaming.enable = true;
 
+    # Ship kernel logs to the netconsole collector (arquitens). Wired ethernet
+    # on the collector's LAN; if the USB NIC's driver turns out to lack netpoll
+    # support, the netconsole modprobe fails and keeps retrying (check
+    # `systemctl status netconsole-sender` after first rebuild).
+    system.netconsole.enable = true;
+
     # Hardening baseline (pilot host) — workstation profile keeps userns on
     # for Steam/Chromium sandboxing and skips the linux-hardened kernel so
     # NVIDIA DKMS keeps working.
