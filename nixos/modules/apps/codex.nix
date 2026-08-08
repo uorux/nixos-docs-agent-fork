@@ -16,6 +16,7 @@
       ../../../lib/features/cwd.nix
       ../../../lib/features/git.nix
       ../../../lib/features/bin-sh.nix
+      ../../../lib/features/agent-peers.nix
     ];
 
     config.app = {

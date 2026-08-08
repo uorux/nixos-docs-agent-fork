@@ -17,6 +17,7 @@
       ../../../lib/features/git.nix
       ../../../lib/features/nix-store.nix
       ../../../lib/features/bin-sh.nix
+      ../../../lib/features/agent-peers.nix
     ];
 
     config.app = {
