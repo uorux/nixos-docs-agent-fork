@@ -82,7 +82,7 @@
       inputs.home-manager.follows = "home-manager";
     };
     hyprland = {
-      url = "github:hyprwm/Hyprland/v0.55.4?submodules=1";
+      url = "github:hyprwm/Hyprland/v0.56.2?submodules=1";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     nixvim = {

@@ -73,8 +73,10 @@
     age.sshKeyPaths = [ "/etc/ssh/ssh_host_ed25519_key" ];
   };
 
-  # Enable full desktop environment
-  modules.desktop.full.enable = true;
+  # Headless server: no desktop (boots to multi-user.target; access via SSH),
+  # same pattern as the k3s nodes. Intel iGPU below stays for media transcoding.
+  # Flip back to true to use it as a workstation again.
+  modules.desktop.full.enable = false;
 
   # Enable Intel iGPU (for media transcoding)
   modules.system.hardware.intel = {

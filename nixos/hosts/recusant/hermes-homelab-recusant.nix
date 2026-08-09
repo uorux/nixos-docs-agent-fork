@@ -126,11 +126,15 @@ in
       # ChatGPT subscription via Codex OAuth (manual login, bootstrap step 5).
       # Auxiliary tasks stay on "auto": they pick codex/openrouter from
       # whatever auth is present, so the OpenRouter key doubles as fallback.
-      # Codex-backend slugs at the pinned rev: gpt-5.5, gpt-5.4[-mini],
+      # Codex-backend slugs at the pinned rev: gpt-5.6[-sol|-terra|-luna],
+      # gpt-5.5, gpt-5.4[-mini] (retire from Codex 2026-08-31),
       # gpt-5.3-codex, gpt-5.3-codex-spark (Pro-only preview; /model to try).
+      # Terra: ~gpt-5.5 quality at half the token/quota weight. Bare "gpt-5.6"
+      # aliases to sol, which is heavier and has reported auth errors on
+      # ChatGPT-account Codex — pin terra explicitly.
       model = {
         provider = "openai-codex";
-        default = "gpt-5.5";
+        default = "gpt-5.6-terra";
       };
 
       # One server channel, @mention-gated; channel allowlist comes from

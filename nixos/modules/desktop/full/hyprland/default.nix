@@ -11,11 +11,24 @@ let
   cfg = config.modules.desktop.full.hyprland;
   system = pkgs.stdenv.hostPlatform.system;
 
+  # v0.56.2's CMake pins glaze 7...<8, but current nixpkgs (including
+  # Hyprland's own pin) ships glaze 8.0.0 — find_package rejects it and CMake
+  # falls back to a build-time git clone, which the Nix sandbox forbids.
+  # Upstream dropped the constraint on main (91f29f2, no code changes needed);
+  # backport that one-liner here. Drop on the next hyprland input bump.
+  hyprlandPkg = inputs.hyprland.packages.${system}.hyprland.overrideAttrs (old: {
+    postPatch = (old.postPatch or "") + ''
+      substituteInPlace CMakeLists.txt \
+        --replace-fail "find_package(glaze 7...<8 QUIET)" "find_package(glaze QUIET)"
+    '';
+  });
+  hyprlandPortalPkg = inputs.hyprland.packages.${system}.xdg-desktop-portal-hyprland.override {
+    hyprland = hyprlandPkg;
+  };
+
   # Screencopy permission allow-list targets. Exact store paths double as
   # regexes for hl.permission — they re-interpolate on every rebuild.
-  portalExe = "${
-    inputs.hyprland.packages.${system}.xdg-desktop-portal-hyprland
-  }/libexec/xdg-desktop-portal-hyprland";
+  portalExe = "${hyprlandPortalPkg}/libexec/xdg-desktop-portal-hyprland";
   grimExe = lib.getExe pkgs.grim;
   hyprlockExe = lib.getExe pkgs.hyprlock;
   hyprpickerExe = lib.getExe pkgs.hyprpicker;
@@ -170,9 +183,8 @@ in
     # System-level Hyprland configuration
     programs.hyprland = {
       enable = true;
-      package = inputs.hyprland.packages."${pkgs.stdenv.hostPlatform.system}".hyprland;
-      portalPackage =
-        inputs.hyprland.packages.${pkgs.stdenv.hostPlatform.system}.xdg-desktop-portal-hyprland;
+      package = hyprlandPkg;
+      portalPackage = hyprlandPortalPkg;
     };
 
     # Desktop packages
@@ -195,7 +207,7 @@ in
       mako
       hyprshade
       psmisc
-      inputs.hyprland.packages."${pkgs.stdenv.hostPlatform.system}".hyprland
+      hyprlandPkg
       xdg-desktop-portal-hyprland
       networkmanager-openvpn
       networkmanagerapplet
@@ -244,8 +256,8 @@ in
         # Lua config (hyprlang is deprecated since 0.55). Required to use the
         # permission system, which is Lua-only and read once at startup.
         configType = "lua";
-        package = inputs.hyprland.packages.${system}.hyprland;
-        portalPackage = inputs.hyprland.packages.${system}.xdg-desktop-portal-hyprland;
+        package = hyprlandPkg;
+        portalPackage = hyprlandPortalPkg;
         systemd.variables = [ "--all" ];
 
         # Table-shaped keywords stay declarative: home-manager renders each as
