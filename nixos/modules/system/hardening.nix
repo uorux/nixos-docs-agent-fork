@@ -261,10 +261,14 @@ in
   config = lib.mkIf cfg.enable {
     boot.kernel.sysctl = lib.mkMerge [
       (hardenSysctls {
-        # Restrict kernel pointer/log exposure
+        # Restrict kernel pointer/log exposure. No kernel.printk clamp here:
+        # it silenced the netconsole feed fleet-wide (netconsole.nix now sets
+        # "5 4 1 7" on senders), and its security value was marginal anyway —
+        # dmesg_restrict already gates log reading, and the quiet console
+        # comes from kernel.nix's cmdline (consoleLogLevel/quiet), not this
+        # runtime sysctl.
         "kernel.kptr_restrict" = 2;
         "kernel.dmesg_restrict" = 1;
-        "kernel.printk" = "3 3 3 3";
 
         # Restrict tracing/profiling/BPF surface
         "kernel.yama.ptrace_scope" = 1;

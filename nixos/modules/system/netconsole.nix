@@ -21,9 +21,13 @@
 #  - Sender identity: boot-param targets can't carry the configfs userdata
 #    " host=" tag, so the collector names senders by source IP via hostMap
 #    (another reason the DHCP reservations matter).
-#  - The leading "+" makes netconsole a CON_EXTENDED console: it gets *every*
-#    printk record regardless of console loglevel, with priority/sequence
-#    metadata (parsed out by the collector's vector).
+#  - The leading "+" makes netconsole a CON_EXTENDED console: records carry
+#    priority/sequence metadata (parsed out by the collector's vector). It is
+#    still loglevel-gated like any console — printk_get_next_message() applies
+#    suppress_message_printing() to extended consoles too (only /dev/kmsg
+#    readers bypass the loglevel), hence the kernel.printk raise below. Actual
+#    oops/panic output is exempt either way: oops_enter()/panic() call
+#    console_verbose() first.
 {
   config,
   lib,
@@ -159,6 +163,16 @@ in
         options netconsole netconsole=+@${toString cfg.localIp}/${toString cfg.device},${toString cfg.port}@${cfg.collectorIp}/${cfg.collectorMac}
       '';
 
+      # The hardening profile pins kernel.printk to "3 3 3 3" (mkOverride 900),
+      # which mutes everything below crit — on a healthy box that's a silent
+      # netconsole feed. Senders raise the console level to 5 so the warning/
+      # error tier (WARN() splats, I/O errors, hung tasks, shutdown progress)
+      # ships too; message-default 4 keeps the unprefixed `echo | tee /dev/kmsg`
+      # smoke test transmitting. Plain definition (prio 100) beats the
+      # hardening's 900; non-sender laptops keep the full clamp. Applied live
+      # by systemd-sysctl on switch — no reboot needed.
+      boot.kernel.sysctl."kernel.printk" = "5 4 1 7";
+
       # Deliberately NOT boot.kernelModules: systemd-modules-load runs before
       # the USB LAN NICs enumerate, and netconsole's modprobe fails hard when
       # the device doesn't exist yet. Load after network-online instead, with
@@ -244,6 +258,25 @@ in
             # Kernel logs are low-volume and the interesting ones precede a
             # crash — ship promptly rather than batching for throughput.
             batch.timeout_secs = 1;
+            # Crash bursts arrive exactly when infrastructure may be down
+            # (collector rebooting, VictoriaLogs NodePort unreachable) — the
+            # default in-memory buffer drops them on vector shutdown, which
+            # already lost one arquitens reboot burst (2026-08-09). Spool to
+            # disk instead (data_dir = the unit's StateDirectory,
+            # /var/lib/vector) and block upstream rather than shed. 512 MiB;
+            # vector rejects disk buffers smaller than 256 MiB + 32 B.
+            buffer = {
+              type = "disk";
+              max_size = 536870912;
+              when_full = "block";
+            };
+            # End-to-end acks: events leave the buffer only after VictoriaLogs
+            # confirms the write, so a mid-flight restart replays instead of
+            # dropping. `vector validate` WARNs that the UDP source can't
+            # propagate acks upstream — inherent to netconsole's fire-and-forget
+            # datagrams, not a config problem; the ack still gates buffer
+            # deletion on the sink side.
+            acknowledgements.enabled = true;
           };
         };
       };
