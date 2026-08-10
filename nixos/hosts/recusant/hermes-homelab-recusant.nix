@@ -136,6 +136,12 @@ in
         provider = "openai-codex";
         default = "gpt-5.6-terra";
       };
+      # Keep scheduled jobs independent from future interactive model changes;
+      # otherwise Hermes intentionally fails an unpinned job closed on drift.
+      cron = {
+        model = "gpt-5.6-terra";
+        model_provider = "openai-codex";
+      };
 
       # One server channel, @mention-gated; channel allowlist comes from
       # DISCORD_ALLOWED_CHANNELS in the sops env (env overrides config.yaml).
