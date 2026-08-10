@@ -95,8 +95,12 @@ in
             Type = "oneshot";
             RemainAfterExit = true;
           };
+          # Must be the initrd's own systemd (the only one copied into the
+          # initrd): make-initrd-ng follows ELF deps, not script references,
+          # and pkgs.systemd is no longer the same derivation as
+          # config.systemd.package (nixpkgs patches the latter via `apply`).
           script = ''
-            actual=$(${pkgs.systemd}/bin/systemd-analyze pcrs 15 --json=short \
+            actual=$(${config.boot.initrd.systemd.package}/bin/systemd-analyze pcrs 15 --json=short \
                      | ${pkgs.jq}/bin/jq -r '.[0].sha256')
             if [[ "$actual" != "${cfg.expectedPcr15}" ]]; then
               echo "PCR 15 verification FAILED" >&2
