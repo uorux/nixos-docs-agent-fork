@@ -80,12 +80,20 @@ in
         endpoint = "http://${tailscaleIp}:3900";
       };
 
-      # Content-defined chunking → global dedup across pushes (module defaults).
+      # Content-defined chunking → global dedup across pushes. The module
+      # defaults (16/64/256 KiB min/avg/max) made CI pushes latency-bound: every
+      # chunk costs a dedup lookup + 3 SQLite writes + an S3 PUT into Garage,
+      # atticd caps chunk uploads at 10 in flight, and Garage fsyncs each PUT
+      # (data_fsync, garage.nix) — so a ~1 GB push was ~16k fsync-bound
+      # roundtrips (~6-7 min wall, near-zero CPU). 16× larger chunks → 16×
+      # fewer roundtrips, at the cost of coarser dedup. NB: changing these
+      # shifts the CDC cutpoints, so existing chunks won't dedup against new
+      # pushes — the ratio suffers until old NARs age out.
       chunking = {
-        nar-size-threshold = 65536;
-        min-size = 16384;
-        avg-size = 65536;
-        max-size = 262144;
+        nar-size-threshold = 1048576; # chunk NARs ≥ 1 MiB (= avg, as upstream)
+        min-size = 262144; # 256 KiB
+        avg-size = 1048576; # 1 MiB
+        max-size = 4194304; # 4 MiB
       };
     };
   };
@@ -119,6 +127,10 @@ in
         # NAR uploads from CI can be large; don't let nginx cap or time them out.
         client_max_body_size 0;
         proxy_read_timeout 300s;
+        # Stream uploads straight to atticd instead of spooling each NAR to a
+        # temp file first — the default buffering writes every pushed GB to
+        # disk twice (spool + Garage) and serializes receive→forward.
+        proxy_request_buffering off;
       '';
     };
   };
